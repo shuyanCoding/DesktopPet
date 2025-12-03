@@ -15,12 +15,28 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QMenu, QAction, QSystemTr
 from PyQt5.QtCore import QTimer, Qt, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 
+def resource_path(relative_path):
+    """ 获取资源的绝对路径，适配开发环境和打包后的环境 """
+    try:
+        # PyInstaller 创建的临时目录
+        base_path = sys._MEIPASS
+    except Exception:
+        # 正常运行时的当前目录
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
 # ==========================================
 # 1. 配置区域
 # ==========================================
-IMG_DIR = "./img_quan"
-# IMG_DIR = "./img_cat"     切换到云母桌宠
-RUNCAT_DIR = "./icons/cat2/processed"
+# 原代码: IMG_DIR = "./img_quan"
+# 修改为:
+IMG_DIR = resource_path("img_quan")
+
+# 原代码: RUNCAT_DIR = "./icons/cat2/processed"
+# 修改为:
+RUNCAT_DIR = resource_path("icons")
 MAX_PETS = 5
 FLOOR_OFFSET = 50
 RIGHT_WALL_OFFSET = 55

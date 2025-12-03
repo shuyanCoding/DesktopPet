@@ -15,13 +15,25 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QMenu, QAction, QSystemTr
 from PyQt5.QtCore import QTimer, Qt, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 
+def resource_path(relative_path):
+    """ 获取资源的绝对路径，适配开发环境和打包后的环境 """
+    try:
+        # PyInstaller 创建的临时目录
+        base_path = sys._MEIPASS
+    except Exception:
+        # 正常运行时的当前目录
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
 # ==========================================
 # 1. Configuration Area
 # ==========================================
 # Default configurations
-DEFAULT_IMG_DIR_QUAN = "./img_quan"
-DEFAULT_IMG_DIR_CAT = "./img_cat"
-RUNCAT_DIR = "./icons/cat2/processed"
+RUNCAT_DIR = resource_path("icons")
+DEFAULT_IMG_DIR_QUAN = resource_path("img_quan")
+DEFAULT_IMG_DIR_CAT = resource_path("img_cat")
+
 
 # Global MAX_PETS variable, modifiable at runtime
 MAX_PETS = 5
@@ -114,7 +126,7 @@ class SharedAssets:
                 type_cache[name + "_r"] = pix.transformed(transform)
 
         self.img_cache[pet_type] = type_cache
-        print(f"Assets for {pet_type} loaded.")
+        # print(f"Assets for {pet_type} loaded.")
 
     def load_runcat_icons(self):
         """Loads RunCat icons (shared)."""
