@@ -20,7 +20,7 @@ from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 # 1. 配置区域
 # ==========================================
 IMG_DIR = "./img_quan"
-RUNCAT_DIR = "./icons/cat"
+RUNCAT_DIR = "./icons/cat2/processed"
 MAX_PETS = 5
 FLOOR_OFFSET = 50
 RIGHT_WALL_OFFSET = 55
