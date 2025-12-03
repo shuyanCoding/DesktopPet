@@ -9,6 +9,7 @@ from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 # 1. 配置区域
 # ==========================================
 IMG_DIR = "./img_quan"
+# IMG_DIR = "./img_cat"
 MAX_PETS = 5
 
 # --- 核心高度配置 ---

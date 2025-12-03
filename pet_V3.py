@@ -3,7 +3,7 @@ import os
 import random
 import psutil
 
-# 尝试导入 pynvml 用于 GPU 监测
+# Attempt to import pynvml for GPU monitoring
 try:
     import pynvml
 
@@ -11,119 +11,155 @@ try:
 except ImportError:
     HAS_PYNVML = False
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QMenu, QAction, QSystemTrayIcon, QActionGroup
+from PyQt5.QtWidgets import QApplication, QMainWindow, QMenu, QAction, QSystemTrayIcon, QActionGroup, QInputDialog
 from PyQt5.QtCore import QTimer, Qt, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 
 # ==========================================
-# 1. 配置区域
+# 1. Configuration Area
 # ==========================================
-IMG_DIR = "./img_quan"
+# Default configurations
+DEFAULT_IMG_DIR_QUAN = "./img_quan"
+DEFAULT_IMG_DIR_CAT = "./img_cat"
 RUNCAT_DIR = "./icons/cat2/processed"
+
+# Global MAX_PETS variable, modifiable at runtime
 MAX_PETS = 5
+
 FLOOR_OFFSET = 50
 RIGHT_WALL_OFFSET = 55
 
 ACTIONS = {
+    # --- Spawn ---
     "born": [{"img": f"born{i:05d}.png", "dur": 300} for i in range(6)],
+
+    # --- Air/Throw ---
     "fly": [{"img": "fly.png", "dur": 100}],
     "drag_throw": [{"img": "drag00004.png", "dur": 100}],
     "drop": [{"img": "drop.png", "dur": 100}],
+
+    # --- Ground ---
     "idle": [{"img": "idle.png", "dur": 3000}],
     "walk": [{"img": f"walk{i:05d}.png", "dur": 150} for i in range(11)],
     "run": [{"img": f"walk{i:05d}.png", "dur": 100} for i in range(11, 20)],
     "standup": [{"img": f"standup{i:05d}.png", "dur": 150} for i in range(3)],
+
+    # --- Sit ---
     "sit": [{"img": f"sit{i:05d}.png", "dur": 150} for i in range(10)],
     "sit_idle": [{"img": "sit00009.png", "dur": 2000}],
     "sitloop": [{"img": f"sitloop{i:05d}.png", "dur": 150} for i in range(19)],
+
+    # --- Wall/Ceiling ---
     "wall_idle": [{"img": "wall00000.png", "dur": 3000}],
     "wall_climb": [{"img": f"wall{i:05d}.png", "dur": 180} for i in range(1, 12)],
     "wall_descend": [{"img": f"wall{i:05d}.png", "dur": 180} for i in range(1, 12)],
     "ceiling_walk": [{"img": f"ceiling{i:05d}.png", "dur": 120} for i in range(8)],
+
+    # --- Drag ---
     "drag_left_slow": [{"img": "drag00001.png", "dur": 100}],
     "drag_left_fast": [{"img": "drag00002.png", "dur": 100}],
     "drag_right_slow": [{"img": "drag00003.png", "dur": 100}],
     "drag_right_fast": [{"img": "drag00002.png", "dur": 100}],
+
+    # --- Other ---
     "ie_walk": [{"img": f"ie{i:05d}.png", "dur": 150} for i in range(11)],
     "struggle": [{"img": f"struggle{i:05d}.png", "dur": 120} for i in range(3)],
 }
 
 
 # ==========================================
-# 2. 资源单例 (SharedAssets)
+# 2. Resource Singleton (SharedAssets)
 # ==========================================
-"""
-    单例模式：负责只加载一次图片资源，供所有宠物共享。
-"""
 class SharedAssets:
-
+    """
+    Singleton pattern: Loads image resources only once, shared among all pets.
+    Now supports loading assets for multiple character types.
+    """
     _instance = None
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(SharedAssets, cls).__new__(cls, *args, **kwargs)
             cls._instance.initialized = False
+            cls._instance.img_cache = {}  # Dictionary to store caches for each pet type
+            cls._instance.runcat_icons = []
         return cls._instance
 
-    def load_all(self):
-        if self.initialized: return
-        self.img_cache = {}
-        self.runcat_icons = []
+    def load_pet_assets(self, pet_type, img_dir):
+        """Loads assets for a specific pet type if not already loaded."""
+        if pet_type in self.img_cache:
+            return  # Already loaded
 
-        # 1. 加载宠物动作图片
-        if os.path.exists(IMG_DIR):
-            transform = QTransform().scale(-1, 1)  # 用于生成镜像图片
+        if not os.path.exists(img_dir):
+            print(f"Error: Image directory not found: {img_dir}")
+            return
 
-            # 预加载所有定义的图片
-            for frames_list in ACTIONS.values():
-                for frame_data in frames_list:
-                    name = frame_data["img"]
-                    if name in self.img_cache: continue
+        # print(f"Loading assets for {pet_type} from {img_dir}...")
+        transform = QTransform().scale(-1, 1)  # For creating mirrored images
+        type_cache = {}
 
-                    path = os.path.join(IMG_DIR, name)
-                    pix = QPixmap(path)
-                    if pix.isNull():
-                        pix = QPixmap(128, 128)
-                        pix.fill(Qt.transparent)
+        for frames_list in ACTIONS.values():
+            for frame_data in frames_list:
+                name = frame_data["img"]
+                if name in type_cache: continue
 
-                    self.img_cache[name] = pix
-                    self.img_cache[name + "_r"] = pix.transformed(transform)
+                path = os.path.join(img_dir, name)
+                pix = QPixmap(path)
+                if pix.isNull():
+                    # Fallback to a transparent placeholder if image is missing
+                    pix = QPixmap(128, 128)
+                    pix.fill(Qt.transparent)
 
-        # 2. 加载 RunCat 图标
+                type_cache[name] = pix
+                type_cache[name + "_r"] = pix.transformed(transform)
+
+        self.img_cache[pet_type] = type_cache
+        print(f"Assets for {pet_type} loaded.")
+
+    def load_runcat_icons(self):
+        """Loads RunCat icons (shared)."""
+        if self.runcat_icons: return
+
         if os.path.exists(RUNCAT_DIR):
             for i in range(10):
                 p = os.path.join(RUNCAT_DIR, f"{i}.png")
                 if os.path.exists(p):
                     self.runcat_icons.append(QIcon(p))
                 else:
-                    fallback = self.get_pixmap("idle.png")
-                    if fallback:
-                        self.runcat_icons.append(QIcon(fallback))
+                    # Fallback is tricky here without a guaranteed loaded pet type,
+                    # so we just try to use a placeholder or skip.
+                    # For simplicity, we assume at least one pet type loads successfully
+                    # and we might use its idle image if needed, but here we just skip or use empty.
+                    self.runcat_icons.append(QIcon())
 
-        self.initialized = True
-        # print("所有资源加载完成。")
+    def get_pixmap(self, pet_type, name, look_right=False):
+        if pet_type not in self.img_cache:
+            return None
 
-    def get_pixmap(self, name, look_right=False):
         key = name + "_r" if look_right else name
-        return self.img_cache.get(key)
+        return self.img_cache[pet_type].get(key)
 
 
 # ==========================================
-# 3. 宠物管理器 (PetManager)
+# 3. Pet Manager (PetManager)
 # ==========================================
 class PetManager(QSystemTrayIcon):
     """
-    继承自 QSystemTrayIcon，作为程序的控制中心。
-    负责：托盘图标、硬件监控线程、所有宠物实例的管理。
+    Inherits from QSystemTrayIcon, acts as the control center.
+    Responsible for: Tray icon, hardware monitor thread, management of all pet instances.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pets = []
         self.assets = SharedAssets()
-        self.app = QApplication.instance()  # 获取APP实例
+        self.app = QApplication.instance()
 
-        # --- 硬件监控初始化 ---
+        # Load assets for the default pet (quan)
+        self.assets.load_pet_assets("quan", DEFAULT_IMG_DIR_QUAN)
+        self.assets.load_runcat_icons()
+
+        # --- Hardware Monitor Init ---
         self.monitor_mode = "cpu"
         self.current_usage = 0.0
         self.runcat_frame_index = 0
@@ -138,37 +174,36 @@ class PetManager(QSystemTrayIcon):
             except Exception as e:
                 print(f"GPU Init Failed: {e}")
 
-        # --- 初始化托盘 ---
+        # --- Init Tray ---
         self.init_tray_ui()
 
-        # --- 启动定时器 ---
-        # 1. 硬件采样定时器 (1秒1次)
+        # --- Start Timers ---
+        # 1. Hardware sampling timer (1 sec)
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self.update_monitor_data)
         self.monitor_timer.start(1000)
 
-        # 2. 窗口层级排序定时器 (500ms1次)
+        # 2. Window sorting timer (500ms)
         self.sort_timer = QTimer(self)
         self.sort_timer.timeout.connect(self.sort_windows)
         self.sort_timer.start(500)
 
-        # 3. 启动 RunCat 动画
+        # 3. Start RunCat animation
         self.update_runcat_icon()
 
     def init_tray_ui(self):
-        # 设置默认图标
-        default_pix = self.assets.get_pixmap("idle.png")
+        # Set default icon (using 'quan' idle image)
+        default_pix = self.assets.get_pixmap("quan", "idle.png")
         if default_pix:
             self.setIcon(QIcon(default_pix))
 
-        # --- 【修改】托盘菜单逻辑 ---
+        # --- Tray Menu Logic ---
         tray_menu = QMenu()
 
         monitor_menu = QMenu("监测指标", tray_menu)
         monitor_group = QActionGroup(self)
 
         act_cpu = QAction("CPU", self, checkable=True)
-        # 默认勾选 CPU
         if self.monitor_mode == 'cpu': act_cpu.setChecked(True)
         act_cpu.triggered.connect(lambda: self.set_monitor_mode("cpu"))
         monitor_menu.addAction(monitor_group.addAction(act_cpu))
@@ -188,9 +223,25 @@ class PetManager(QSystemTrayIcon):
         tray_menu.addMenu(monitor_menu)
         tray_menu.addSeparator()
 
-        act_spawn = QAction("生成分身", self)
-        act_spawn.triggered.connect(self.spawn_pet)
-        tray_menu.addAction(act_spawn)
+        # --- Dynamic MAX_PETS Setting ---
+        act_set_max_pets = QAction("设置宠物数量上限", self)
+        act_set_max_pets.triggered.connect(self.set_max_pets)
+        tray_menu.addAction(act_set_max_pets)
+
+        tray_menu.addSeparator()
+
+        # --- Spawn Options ---
+        spawn_menu = QMenu("生成分身", tray_menu)
+
+        act_spawn_quan = QAction("生成犬夜叉分身", self)
+        act_spawn_quan.triggered.connect(lambda: self.spawn_pet(pet_type="quan"))
+        spawn_menu.addAction(act_spawn_quan)
+
+        act_spawn_cat = QAction("生成云母分身", self)
+        act_spawn_cat.triggered.connect(lambda: self.spawn_pet(pet_type="cat"))
+        spawn_menu.addAction(act_spawn_cat)
+
+        tray_menu.addMenu(spawn_menu)
 
         act_clean = QAction("清除所有分身", self)
         act_clean.triggered.connect(self.remove_all_pets)
@@ -204,6 +255,205 @@ class PetManager(QSystemTrayIcon):
         self.setContextMenu(tray_menu)
         self.show()
 
+    # def set_max_pets(self):
+    #     """动态设置 MAX_PETS，并自动清理多余的宠物（UI美化版）"""
+    #     global MAX_PETS
+    #
+    #     # 1. 创建对话框实例（而不是使用静态方法）
+    #     dialog = QInputDialog()
+    #     dialog.setWindowTitle("设置")
+    #     dialog.setLabelText("请输入最大宠物数量:")
+    #     dialog.setIntRange(1, 50)
+    #     dialog.setIntValue(MAX_PETS)
+    #     dialog.setIntStep(1)
+    #
+    #     # 2. 设置按钮文字（中文化）
+    #     dialog.setOkButtonText("确定")
+    #     dialog.setCancelButtonText("取消")
+    #
+    #     # 3. 去除标题栏上的“问号”帮助按钮
+    #     dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+    #
+    #     # 4. 【核心美化】设置 QSS 样式表
+    #     # 类似网页 CSS，支持圆角、扁平化、颜色定义
+    #     dialog.setStyleSheet("""
+    #         QDialog {
+    #             background-color: #ffffff;
+    #             font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    #         }
+    #         QLabel {
+    #             font-size: 14px;
+    #             font-weight: bold;
+    #             color: #333333;
+    #             margin-bottom: 5px;
+    #         }
+    #         QSpinBox {
+    #             min-width: 200px;
+    #             height: 32px;
+    #             padding: 0 5px;
+    #             border: 1px solid #cccccc;
+    #             border-radius: 4px;
+    #             font-size: 14px;
+    #             background-color: #f9f9f9;
+    #         }
+    #         QSpinBox:focus {
+    #             border: 1px solid #0078d4;
+    #             background-color: #ffffff;
+    #         }
+    #         /* 确定按钮 (默认按钮) */
+    #         QPushButton {
+    #             height: 30px;
+    #             padding: 0 15px;
+    #             border-radius: 4px;
+    #             font-size: 13px;
+    #             background-color: #f0f0f0;
+    #             border: 1px solid #dcdcdc;
+    #         }
+    #         QPushButton:hover {
+    #             background-color: #e0e0e0;
+    #         }
+    #         /* 专门美化“确定”按钮，设为蓝色高亮 */
+    #         QPushButton:default {
+    #             background-color: #0078d4;
+    #             color: white;
+    #             border: 1px solid #0078d4;
+    #             font-weight: bold;
+    #         }
+    #         QPushButton:default:hover {
+    #             background-color: #006abc;
+    #         }
+    #         QPushButton:default:pressed {
+    #             background-color: #005a9e;
+    #         }
+    #     """)
+    #
+    #     # 5. 执行弹窗并获取结果
+    #     ok = dialog.exec_()
+    #     num = dialog.intValue()
+    #
+    #     if ok:
+    #         MAX_PETS = num
+    #         # print(f"MAX_PETS updated to {MAX_PETS}")
+    #
+    #         # --- 检查并清理多余宠物逻辑 ---
+    #         current_count = len(self.pets)
+    #         if current_count > MAX_PETS:
+    #             # 获取多出来的宠物列表（从列表末尾截取，即移除最新生成的）
+    #             pets_to_remove = self.pets[MAX_PETS:]
+    #             for pet in pets_to_remove:
+    #                 pet.close()
+    def set_max_pets(self):
+        """动态设置 MAX_PETS（UI美化版 - 简约白圆润风）"""
+        global MAX_PETS
+
+        dialog = QInputDialog()
+        # 保留了你喜欢的自定义文字
+        dialog.setWindowTitle("召唤设置 ✨")
+        dialog.setLabelText("想要多少只小可爱同时出现？")
+        dialog.setIntRange(1, 50)
+        dialog.setIntValue(MAX_PETS)
+        dialog.setIntStep(1)
+
+        # 按钮文字
+        dialog.setOkButtonText("决定了")
+        dialog.setCancelButtonText("算了")
+
+        # 去除问号
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        # 【核心美化】简约白圆润风 QSS
+        style_sheet = """
+            /* 全局背景：纯白 */
+            QDialog {
+                background-color: #ffffff;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            }
+
+            /* 标签文字：深灰，清晰 */
+            QLabel {
+                font-size: 15px;
+                color: #333333;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }
+
+            /* 输入框：极简灰白底 + 圆角 */
+            QSpinBox {
+                min-width: 180px;
+                height: 30px;
+                border: 2px solid #f0f0f0; /* 极淡的边框 */
+                border-radius: 20px;       /* 全圆角 */
+                padding: 0 15px;
+                background-color: #f9f9f9; /* 极淡灰背景 */
+                color: #333333;
+                font-size: 18px;
+                font-weight: bold;
+                selection-background-color: #ddd;
+            }
+            /* 鼠标悬停 */
+            QSpinBox:hover {
+                border: 2px solid #e0e0e0;
+                background-color: #ffffff;
+            }
+            /* 聚焦状态：深色边框，强调输入 */
+            QSpinBox:focus {
+                border: 2px solid #333333; 
+                background-color: #ffffff;
+            }
+
+            /* 隐藏原本丑陋的上下箭头按钮，保持视觉极简 */
+            /* 用户依然可以通过键盘上下键或滚轮调节数值 */
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 0px; 
+                border: none;
+            }
+
+            /* 按钮通用设置 */
+            QPushButton {
+                height: 36px;
+                border-radius: 18px; /* 圆角按钮 */
+                font-size: 14px;
+                min-width: 90px;
+                font-weight: bold;
+                border: none;
+            }
+
+            /* 取消按钮 ("算了") - 浅灰风格 */
+            QPushButton[text="算了"] {
+                background-color: #f2f2f2;
+                color: #666666;
+            }
+            QPushButton[text="算了"]:hover {
+                background-color: #e5e5e5;
+                color: #333333;
+            }
+
+            /* 确定按钮 ("决定了") - 深黑风格，黑白对比 */
+            QPushButton[text="决定了"] {
+                background-color: #333333;
+                color: #ffffff;
+            }
+            QPushButton[text="决定了"]:hover {
+                background-color: #555555;
+            }
+            QPushButton[text="决定了"]:pressed {
+                background-color: #000000;
+            }
+        """
+        dialog.setStyleSheet(style_sheet)
+
+        ok = dialog.exec_()
+        num = dialog.intValue()
+
+        if ok:
+            MAX_PETS = num
+            # 清理逻辑
+            current_count = len(self.pets)
+            if current_count > MAX_PETS:
+                pets_to_remove = self.pets[MAX_PETS:]
+                for pet in pets_to_remove:
+                    pet.close()
+
     def add_pet(self, pet):
         self.pets.append(pet)
 
@@ -212,31 +462,40 @@ class PetManager(QSystemTrayIcon):
             self.pets.remove(pet)
 
     def remove_all_pets(self):
-        """清除所有分身"""
-        # 倒序遍历删除，防止列表索引错乱
+        """Clears all pets."""
         for pet in self.pets[:]:
-            pet.close()  # 触发 closeEvent -> manager.remove_pet
-        # 这里的 self.pets 会在 pet.close() 调用 remove_pet 时自动清空
+            pet.close()
 
-    def spawn_pet(self, source_x=None, source_y=None):
+    def spawn_pet(self, source_x=None, source_y=None, pet_type="quan"):
         """
-        生成分身
-        :param source_x: 参考源X坐标 (如果有)
-        :param source_y: 参考源Y坐标 (如果有)
+        Spawns a pet clone.
+        :param source_x: Reference X coordinate (if any)
+        :param source_y: Reference Y coordinate (if any)
+        :param pet_type: 'quan' or 'cat'
         """
-        if len(self.pets) >= MAX_PETS: return
+        # Global limit check (applies to total pets of all types)
+        if len(self.pets) >= MAX_PETS:
+            print(f"Cannot spawn: Max pets limit ({MAX_PETS}) reached.")
+            return
+
+        # Ensure assets for this type are loaded
+        if pet_type == "cat":
+            self.assets.load_pet_assets("cat", DEFAULT_IMG_DIR_CAT)
+        elif pet_type == "quan":
+            self.assets.load_pet_assets("quan", DEFAULT_IMG_DIR_QUAN)
 
         start_x, start_y = None, None
 
-        # 优先级1：如果指定了坐标（来自右键点击的宠物），就从那里生成
+        # Priority 1: Use specific coordinates (from right-click)
         if source_x is not None and source_y is not None:
             start_x, start_y = source_x + 20, source_y - 20
-        # 优先级2：如果没有指定（来自托盘菜单），则默认找第一只宠物
+        # Priority 2: Use first pet's location as reference
         elif self.pets:
             target = self.pets[0]
             start_x, start_y = target.x + 20, target.y - 20
 
-        new_pet = DesktopPet(self, start_pos=(start_x, start_y) if start_x else None, start_state="drop")
+        new_pet = DesktopPet(self, pet_type=pet_type, start_pos=(start_x, start_y) if start_x else None,
+                             start_state="drop")
         new_pet.vx = random.choice([-2, 2])
         new_pet.vy = -5
         self.add_pet(new_pet)
@@ -277,7 +536,7 @@ class PetManager(QSystemTrayIcon):
         self.setIcon(icons[self.runcat_frame_index])
         self.runcat_frame_index = (self.runcat_frame_index + 1) % len(icons)
 
-        # 延迟算法
+        # Delay algorithm
         delay_sec = 0.2 - (self.current_usage * 0.18)
         delay_ms = int(delay_sec * 1000)
         if delay_ms < 20: delay_ms = 20
@@ -286,20 +545,21 @@ class PetManager(QSystemTrayIcon):
 
 
 # ==========================================
-# 4. 桌面宠物类 (轻量化)
+# 4. Desktop Pet Class
 # ==========================================
 class DesktopPet(QMainWindow):
-    def __init__(self, manager, start_pos=None, start_state="drop"):
+    def __init__(self, manager, pet_type="quan", start_pos=None, start_state="drop"):
         super().__init__()
-        self.manager = manager  # 持有 Manager 引用
+        self.manager = manager
         self.assets = SharedAssets()
+        self.pet_type = pet_type  # Store the type (quan/cat)
 
-        # --- 窗口设置 ---
+        # --- Window Settings ---
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
 
-        # --- 屏幕管理 ---
+        # --- Screen Management ---
         self.desktop = QApplication.desktop()
         if start_pos:
             self.x, self.y = start_pos
@@ -310,29 +570,29 @@ class DesktopPet(QMainWindow):
 
         self.update_screen_info(force_update=True)
 
-        # --- 状态与物理 ---
+        # --- State & Physics ---
         self.state = start_state
         self.look_right = True
         self.vx = 0
         self.vy = 0
         self.gravity = 2
 
-        # 开关
+        # Toggles
         self.is_fixed = False
         self.wander_mode = None
 
-        # 动画
+        # Animation
         self.frame_index = 0
         self.frame_timer = 0
 
-        # 交互
+        # Interaction
         self.is_dragging = False
         self.mouse_history = []
         self.drag_offset = QPoint(0, 0)
         self.last_drag_x = 0
         self.ceiling_dist = 0
 
-        # --- 定时器 ---
+        # --- Timer ---
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_tick)
         self.timer.start(30)
@@ -348,7 +608,7 @@ class DesktopPet(QMainWindow):
         if self.is_dragging:
             return
 
-        # 物理逻辑
+        # Physics Logic
         if self.is_fixed and self.state not in ["drag_throw", "fly", "drop"]:
             pass
         else:
@@ -364,7 +624,7 @@ class DesktopPet(QMainWindow):
             elif self.state in ["idle", "walk", "run", "ie_walk"]:
                 self.update_physics_floor()
 
-        # 移动窗口
+        # Move Window
         if self.is_fixed and self.state not in ["fly", "drop", "drag_throw"]:
             pass
         else:
@@ -375,7 +635,8 @@ class DesktopPet(QMainWindow):
         if self.frame_index >= len(conf): self.frame_index = 0
 
         img_name = conf[self.frame_index]["img"]
-        pix = self.assets.get_pixmap(img_name, self.look_right)
+        # Request image for this specific pet type
+        pix = self.assets.get_pixmap(self.pet_type, img_name, self.look_right)
 
         if pix:
             self.pixmap = pix
@@ -403,11 +664,8 @@ class DesktopPet(QMainWindow):
 
     def on_action_finished(self):
         if self.state == "born":
-            # 原来的代码：
-            # self.manager.spawn_pet()
-
-            # 修改后的代码 (让分身从自己身边生出来)：
-            self.manager.spawn_pet(self.x, self.y)
+            # Spawn a clone of the SAME type from this pet
+            self.manager.spawn_pet(self.x, self.y, pet_type=self.pet_type)
             self.set_state("idle")
         elif self.state == "sit":
             self.set_state("sit_idle")
@@ -452,7 +710,7 @@ class DesktopPet(QMainWindow):
         self.frame_timer = 0
         self.update_image()
 
-    # --- 辅助方法 (用于菜单逻辑) ---
+    # --- Helper methods ---
     def snap_to_nearest_wall(self):
         left_wall_x = self.screen_rect.left()
         right_wall_x = self.screen_rect.right() - 128 - RIGHT_WALL_OFFSET
@@ -468,12 +726,12 @@ class DesktopPet(QMainWindow):
             self.look_right = True
 
     def start_wall_wander(self):
-        """强制开始墙壁漫游"""
+        """Force start wall wander."""
         self.wander_mode = "wall"
         self.snap_to_nearest_wall()
         self.set_state("wall_climb")
 
-    # --- 物理逻辑 ---
+    # --- Physics Logic ---
     def update_screen_info(self, force_update=False):
         if not force_update and self.state in ["wall_climb", "wall_descend", "wall_idle", "ceiling_walk"]:
             return
@@ -534,9 +792,11 @@ class DesktopPet(QMainWindow):
         right = self.screen_rect.right() - 128 - RIGHT_WALL_OFFSET
 
         if self.x < left + 64:
-            self.x = left; self.look_right = False
+            self.x = left;
+            self.look_right = False
         else:
-            self.x = right; self.look_right = True
+            self.x = right;
+            self.look_right = True
 
         if self.state == "wall_climb":
             if not self.is_fixed: self.y -= 5
@@ -555,9 +815,11 @@ class DesktopPet(QMainWindow):
     def to_ceiling(self, l, r):
         self.set_state("ceiling_walk")
         if abs(self.x - l) < 50:
-            self.x = l + 5; self.look_right = True
+            self.x = l + 5;
+            self.look_right = True
         else:
-            self.x = r - 5; self.look_right = False
+            self.x = r - 5;
+            self.look_right = False
 
     def update_physics_ceiling(self):
         self.y = self.screen_rect.top()
@@ -580,7 +842,8 @@ class DesktopPet(QMainWindow):
             elif self.wander_mode == "full":
                 self.set_state("wall_descend")
             else:
-                self.set_state("drop"); self.vy = 0
+                self.set_state("drop");
+                self.vy = 0
         elif self.x >= right:
             self.x = right
             if self.wander_mode == "ceiling":
@@ -588,7 +851,8 @@ class DesktopPet(QMainWindow):
             elif self.wander_mode == "full":
                 self.set_state("wall_descend")
             else:
-                self.set_state("drop"); self.vy = 0
+                self.set_state("drop");
+                self.vy = 0
 
     def update_physics_floor(self):
         if self.state in ["walk", "run", "ie_walk"]:
@@ -613,7 +877,7 @@ class DesktopPet(QMainWindow):
                 else:
                     self.set_state("wall_idle")
 
-    # --- 鼠标交互 ---
+    # --- Mouse Interaction ---
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.is_dragging = True
@@ -633,9 +897,11 @@ class DesktopPet(QMainWindow):
             self.last_drag_x = curr_x
 
             if dx < -2:
-                self.set_state("drag_left_fast"); self.look_right = False
+                self.set_state("drag_left_fast");
+                self.look_right = False
             elif dx > 2:
-                self.set_state("drag_right_fast"); self.look_right = True
+                self.set_state("drag_right_fast");
+                self.look_right = True
 
             self.x = new_pos.x()
             self.y = new_pos.y()
@@ -658,17 +924,19 @@ class DesktopPet(QMainWindow):
             self.vy = vy
 
             if vx < -2:
-                self.set_state("fly"); self.look_right = False
+                self.set_state("fly");
+                self.look_right = False
             elif vx > 2:
-                self.set_state("drag_throw"); self.look_right = True
+                self.set_state("drag_throw");
+                self.look_right = True
             else:
                 self.set_state("drop")
             event.accept()
 
-    # --- 【修正】右键菜单逻辑 ---
+    # --- Right Click Menu ---
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        debug_menu = menu.addMenu("动作调试")
+        debug_menu = menu.addMenu("调试动作")
 
         debug_list = [
             ("Born (分身)", "born"),
@@ -680,7 +948,7 @@ class DesktopPet(QMainWindow):
             ("Run (跑步)", "run"),
             ("Wall Climb (向上爬墙)", "wall_climb"),
             ("Ceiling Walk (爬天花板)", "ceiling_walk"),
-            ("IE Walk", "ie_walk"),
+            ("IE Walk (健走)", "ie_walk"),
 
             ("---", "sep"),
 
@@ -697,24 +965,26 @@ class DesktopPet(QMainWindow):
 
             act = QAction(name, self)
 
-            # --- 核心修改开始 ---
             if key == "wall_wander":
                 act.triggered.connect(self.start_wall_wander)
 
             elif key == "wall_climb":
-                # 【修正】：先吸附到最近墙壁，再开始爬墙
                 act.triggered.connect(lambda: [self.snap_to_nearest_wall(), self.set_state("wall_climb")])
 
             elif key == "ceiling_wander":
                 act.triggered.connect(
                     lambda: [setattr(self, 'wander_mode', "ceiling"), self.set_state("ceiling_walk")])
+
             elif key == "wander":
-                act.triggered.connect(lambda: [setattr(self, 'wander_mode', "full"), self.set_state("walk")])
+                act.triggered.connect(
+                    lambda: [setattr(self, 'wander_mode', "full"), self.set_state("walk")])
+
             elif key == "stop_wander":
-                act.triggered.connect(lambda: [setattr(self, 'wander_mode', None), self.set_state("idle")])
+                act.triggered.connect(
+                    lambda: [setattr(self, 'wander_mode', None), self.set_state("idle")])
+
             else:
                 act.triggered.connect(lambda chk, k=key: self.set_state(k))
-            # --- 核心修改结束 ---
 
             debug_menu.addAction(act)
 
@@ -739,19 +1009,20 @@ class DesktopPet(QMainWindow):
 
 
 # ==========================================
-# 5. 主程序入口
+# 5. Main Entry Point
 # ==========================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # 1. 预加载资源 (单例)
-    assets = SharedAssets()
-    assets.load_all()
+    # 【核心修复】禁止在最后一个窗口关闭时退出程序
+    # 因为我们的宠物是 Tool 窗口，而设置弹窗是普通窗口，
+    # 关闭弹窗会导致程序误判为应该退出。
+    app.setQuitOnLastWindowClosed(False)
 
-    # 2. 启动管理器 (托盘、监控)
+    # 2. Start Manager (Tray, Monitor)
     manager = PetManager()
 
-    # 3. 生成第一只宠物
-    manager.spawn_pet()
+    # 3. Spawn first pet (Quan by default)
+    manager.spawn_pet(pet_type="quan")
 
     sys.exit(app.exec_())
