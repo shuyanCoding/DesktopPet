@@ -2,10 +2,17 @@ import sys
 import os
 import random
 import threading
-# [新增] 引入 psutil
-import psutil
+import psutil  # pip install psutil
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QMenu, QAction, QSystemTrayIcon
+# [新增] 尝试导入 pynvml 用于 GPU 监测
+try:
+    import pynvml  # pip install nvidia-ml-py
+
+    HAS_PYNVML = True
+except ImportError:
+    HAS_PYNVML = False
+
+from PyQt5.QtWidgets import QApplication, QMainWindow, QMenu, QAction, QSystemTrayIcon, QActionGroup
 from PyQt5.QtCore import QTimer, Qt, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 
@@ -13,11 +20,8 @@ from PyQt5.QtGui import QPixmap, QPainter, QTransform, QIcon
 # 1. 配置区域
 # ==========================================
 IMG_DIR = "./img_quan"
-# [新增] RunCat 图标路径配置
-RUNCAT_DIR = "./icons/runcat_u"
+RUNCAT_DIR = "./icons/cat"
 MAX_PETS = 5
-
-# --- 核心高度配置 ---
 FLOOR_OFFSET = 50
 RIGHT_WALL_OFFSET = 55
 
@@ -134,32 +138,12 @@ class DesktopPet(QMainWindow):
         self.timer.timeout.connect(self.update_tick)
         self.timer.start(30)
 
-        # --- 托盘图标设置 (包含 RunCat 逻辑) ---
+        # --- 托盘图标与 RunCat 初始化 ---
+        # 即使不是第一个宠物，为了支持 RunCat 的数据更新逻辑，
+        # 我们这里简化处理：只有第一个宠物负责创建托盘和 RunCat 逻辑
         if len(manager.pets) == 0:
-            self.tray = QSystemTrayIcon(self)
-
-            # 默认图标 (防止 RunCat 图片加载失败)
-            icon_path = os.path.join(IMG_DIR, "idle.png")
-            if os.path.exists(icon_path):
-                self.tray.setIcon(QIcon(icon_path))
-
-            # 创建托盘菜单
-            tray_menu = QMenu()
-            act_spawn = QAction("生成分身", self)
-            act_spawn.triggered.connect(self.spawn_clone)
-            tray_menu.addAction(act_spawn)
-
-            tray_menu.addSeparator()
-
-            act_exit = QAction("退出程序", self)
-            act_exit.triggered.connect(QApplication.quit)
-            tray_menu.addAction(act_exit)
-
-            self.tray.setContextMenu(tray_menu)
-            self.tray.show()
-
-            # [新增] 启动 RunCat 功能
-            self.init_runcat()
+            self.init_runcat()  # 先初始化数据和 GPU
+            self.init_tray_icon()  # 再初始化托盘和菜单
         # ----------------------------
 
         self.update_image()
@@ -186,72 +170,164 @@ class DesktopPet(QMainWindow):
                 load_file(frame_data["img"])
 
     # ==========================================
-    # [新增] RunCat 核心逻辑
+    # [新增] 托盘菜单与 RunCat 逻辑
     # ==========================================
+    def init_tray_icon(self):
+        self.tray = QSystemTrayIcon(self)
+
+        # 默认图标
+        icon_path = os.path.join(IMG_DIR, "idle.png")
+        if os.path.exists(icon_path):
+            self.tray.setIcon(QIcon(icon_path))
+
+        # --- 创建菜单 ---
+        tray_menu = QMenu()
+
+        # 1. 监测指标切换菜单 (使用 QActionGroup 实现单选)
+        monitor_menu = QMenu("监测指标", tray_menu)
+        monitor_group = QActionGroup(self)
+
+        # CPU 选项
+        self.act_mon_cpu = QAction("CPU", self, checkable=True)
+        self.act_mon_cpu.setChecked(True)  # 默认选中
+        self.act_mon_cpu.triggered.connect(lambda: self.set_monitor_mode("cpu"))
+        monitor_menu.addAction(monitor_group.addAction(self.act_mon_cpu))
+
+        # Memory 选项
+        self.act_mon_mem = QAction("内存 (Memory)", self, checkable=True)
+        self.act_mon_mem.triggered.connect(lambda: self.set_monitor_mode("mem"))
+        monitor_menu.addAction(monitor_group.addAction(self.act_mon_mem))
+
+        # GPU 选项
+        self.act_mon_gpu = QAction("显卡 (GPU)", self, checkable=True)
+        if not self.has_gpu:
+            self.act_mon_gpu.setEnabled(False)
+            self.act_mon_gpu.setText("显卡 (GPU) - 未检测到")
+        else:
+            self.act_mon_gpu.triggered.connect(lambda: self.set_monitor_mode("gpu"))
+        monitor_menu.addAction(monitor_group.addAction(self.act_mon_gpu))
+
+        tray_menu.addMenu(monitor_menu)
+        tray_menu.addSeparator()
+
+        # 2. 其他功能
+        act_spawn = QAction("生成分身", self)
+        act_spawn.triggered.connect(self.spawn_clone)
+        tray_menu.addAction(act_spawn)
+
+        tray_menu.addSeparator()
+
+        act_exit = QAction("退出程序", self)
+        act_exit.triggered.connect(QApplication.quit)
+        tray_menu.addAction(act_exit)
+
+        self.tray.setContextMenu(tray_menu)
+        self.tray.show()
+
+        # 启动 RunCat 动画循环
+        self.update_runcat_icon()
+
     def init_runcat(self):
-        """初始化托盘猫相关资源和定时器"""
-        self.cpu_usage = 0.0
+        """初始化监测资源"""
+        self.monitor_mode = "cpu"  # 默认模式: 'cpu', 'mem', 'gpu'
+        self.current_usage = 0.0
         self.runcat_frame_index = 0
         self.runcat_icons = []
+        self.has_gpu = False
+        self.gpu_handle = None
 
-        # 1. 加载托盘动画图片 (0.png ~ 4.png)
-        # 确保目录 ./icons/runcat 存在，否则不启动
+        # 加载动画图片
         if os.path.exists(RUNCAT_DIR):
-            for i in range(5):
+            for i in range(10):
                 p = os.path.join(RUNCAT_DIR, f"{i}.png")
                 if os.path.exists(p):
                     self.runcat_icons.append(QIcon(p))
                 else:
-                    # 如果缺图，使用主程序的图片代替防止崩溃
                     self.runcat_icons.append(QIcon(os.path.join(IMG_DIR, "idle.png")))
 
-        if not self.runcat_icons:
-            print("RunCat Error: Icons not found.")
-            return
+        # 初始化 GPU (pynvml)
+        if HAS_PYNVML:
+            try:
+                pynvml.nvmlInit()
+                # 获取第0号 GPU
+                self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self.has_gpu = True
+            except Exception as e:
+                print(f"GPU Init Failed: {e}")
+                self.has_gpu = False
 
-        # 2. 启动 CPU 监控定时器 (1秒更新一次数值)
-        self.cpu_timer = QTimer(self)
-        self.cpu_timer.timeout.connect(self.update_cpu_usage)
-        self.cpu_timer.start(1000)
+        # 启动数据采样定时器 (1秒1次)
+        self.monitor_timer = QTimer(self)
+        self.monitor_timer.timeout.connect(self.update_monitor_data)
+        self.monitor_timer.start(1000)
 
-        # 3. 启动动画循环 (使用 singleShot 实现动态间隔)
-        self.update_runcat_icon()
+    def set_monitor_mode(self, mode):
+        self.monitor_mode = mode
+        # 立即更新一次数据
+        self.update_monitor_data()
 
-    def update_cpu_usage(self):
-        """更新 CPU 使用率并设置 Tooltip"""
+    # --- [核心] 检测函数 ---
+    def get_cpu_usage(self):
+        # interval=None 非阻塞
+        return psutil.cpu_percent(interval=None) / 100.0
+
+    def get_mem_usage(self):
+        return psutil.virtual_memory().percent / 100.0
+
+    def get_gpu_usage(self):
+        if not self.has_gpu or not self.gpu_handle:
+            return 0.0
         try:
-            # interval=None 避免阻塞主线程
-            self.cpu_usage = psutil.cpu_percent(interval=None) / 100.0
-            self.tray.setToolTip(f"CPU: {self.cpu_usage:.1%}")
-        except Exception as e:
-            print(f"CPU Fetch Error: {e}")
+            # 获取显存使用率 (RunCat 通常逻辑)
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
+            usage = mem_info.used / mem_info.total
+            return usage
+            # 如果你想用 GPU 计算利用率，可以用这个替代：
+            # rates = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
+            # return rates.gpu / 100.0
+        except:
+            return 0.0
+
+    def update_monitor_data(self):
+        """根据当前模式获取对应数据"""
+        val = 0.0
+        label = "Unknown"
+
+        if self.monitor_mode == "cpu":
+            val = self.get_cpu_usage()
+            label = "CPU"
+        elif self.monitor_mode == "mem":
+            val = self.get_mem_usage()
+            label = "Memory"
+        elif self.monitor_mode == "gpu":
+            val = self.get_gpu_usage()
+            label = "GPU"
+
+        self.current_usage = val
+        if hasattr(self, 'tray'):
+            self.tray.setToolTip(f"{label}: {self.current_usage:.1%}")
 
     def update_runcat_icon(self):
-        """更新托盘图标帧，并计算下一次刷新的延迟"""
+        """动画刷新循环"""
         if not hasattr(self, 'tray') or not self.runcat_icons:
             return
 
-        # 切换图片
+        # 切换图标
         current_icon = self.runcat_icons[self.runcat_frame_index]
         self.tray.setIcon(current_icon)
-
-        # 索引循环
         self.runcat_frame_index = (self.runcat_frame_index + 1) % len(self.runcat_icons)
 
-        # 计算延迟 (算法参考: t = 0.2 - cpu * 0.15)
-        # CPU 0% -> 200ms (慢)
-        # CPU 100% -> 50ms (快)
-        delay_sec = 0.2 - (self.cpu_usage * 0.15)
+        # 根据当前使用率计算延迟
+        # usage: 0.0 ~ 1.0
+        # 延迟: 200ms (空闲) ~ 20ms (满载)
+        delay_sec = 0.2 - (self.current_usage * 0.18)
         delay_ms = int(delay_sec * 1000)
-
-        # 限制最小间隔防止过快
         if delay_ms < 20: delay_ms = 20
 
-        # 递归调用下一帧
         QTimer.singleShot(delay_ms, self.update_runcat_icon)
 
     # ==========================================
-    # 4. 核心循环 Update
+    # 4. 核心循环 Update (未改动)
     # ==========================================
     def update_tick(self):
         self.update_screen_info()
